@@ -1,0 +1,22 @@
+# 本地配置与个人数据（含 API Key、对话、记忆、MCP 令牌），不要提交
+config.json
+conversations.json
+memory.json
+mcp_servers.json
+*.json.bak
+*.json.tmp
+*.broken-*.json
+logs/
+cache/
+
+# 打包产物
+build/
+dist/
+*.zip
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

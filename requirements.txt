@@ -1,0 +1,7 @@
+PyQt6
+requests
+markdown-it-py
+pygments
+pymupdf
+pypdf
+pyinstaller
