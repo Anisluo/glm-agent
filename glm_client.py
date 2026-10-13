@@ -28,6 +28,7 @@ from shell_tools import (SHELL_LABELS, SHELL_SLOW, SHELL_TOOL_NAMES, SHELL_TOOLS
 from memory_store import (COMPRESS_PROMPT, DISTILL_PROMPT, MEMORY_LABELS, MEMORY_PROMPT, MEMORY_TOOL_NAMES,
                           MEMORY_TOOLS, TYPES as MEMORY_TYPES, MemoryStore, parse_json_object, transcript)
 from mcp_client import MCPManager
+from mem import PARTS_LABELS, PARTS_PROMPT, PARTS_TOOL_NAMES, PARTS_TOOLS, PartsStore
 from core import Session, chat_once
 from infra import (BASE_URLS, DEFAULT_CONFIG, HINT_TEXT, SAVER, TOOL_LABELS, TOOL_PROMPT, TOOLS,
                    api_content, dir_overview, diff_stats, lang_of, load_json, open_in_explorer,
@@ -68,6 +69,7 @@ CONVS_PATH = os.path.join(CONFIG_DIR, "conversations.json")
 LOG_DIR = os.path.join(ROOT, "logs")
 MEMORY_PATH = os.path.join(CONFIG_DIR, "memory.json")
 MCP_PATH = os.path.join(CONFIG_DIR, "mcp_servers.json")
+PARTS_DB_PATH = os.path.join(CONFIG_DIR, "parts.db")   # 元件参数库（SQLite）
 COMPRESS_AT = 90000          # 发给模型的历史超过这么多字符时，把较早的部分压缩成摘要
 KEEP_TAIL = 25000            # 压缩后保留的最近原文大约这么多字符
 
@@ -124,10 +126,6 @@ class Distiller(QThread):
 
 
 
-
-
-
-
 # ---------------------------------------------------------------- 单个对话的运行
 # ---------------------------------------------------------------- 主窗口
 class MainWindow(QMainWindow):
@@ -144,6 +142,7 @@ class MainWindow(QMainWindow):
         self.convs = self._valid_convs(load_json(CONVS_PATH, []))
         self.cur = None
         self.memory = MemoryStore(MEMORY_PATH, load_json, save_json)
+        self.parts = PartsStore(PARTS_DB_PATH)   # 结构化器件参数库（SQLite，跨对话）
         self.distill_queue = []      # 等待提炼要点的对话 id
         self.distiller = None
         self.mcp = MCPManager(MCP_PATH)
@@ -669,7 +668,7 @@ class MainWindow(QMainWindow):
             elif p and p["name"] in ("write_file", "edit_file"):
                 text = f"正在撰写 {p['path'] or '文件'}，已生成 {p['chars']:,} 字"
             elif p:
-                verb = {**TOOL_LABELS, **SKILL_LABELS, **SHELL_LABELS, **MEMORY_LABELS}.get(p["name"], ("", "调用工具"))[1]
+                verb = {**TOOL_LABELS, **SKILL_LABELS, **SHELL_LABELS, **MEMORY_LABELS, **PARTS_LABELS}.get(p["name"], ("", "调用工具"))[1]
                 text = f"正在准备{verb}{' ' + p['path'] if p['path'] else ''}"
             elif r.get("content"):
                 text = "正在输出回复"
@@ -702,6 +701,8 @@ class MainWindow(QMainWindow):
         last_user = next((m.get("content", "") for m in reversed(conv["messages"]) if m["role"] == "user"), "")
         digest = self.memory.digest(f"{conv.get('title', '')} {last_user}", exclude_source=conv["id"])
         parts.append(MEMORY_PROMPT + ("\n\n### 相关记忆（自动检索）\n" + digest if digest else "\n\n（记忆库中暂无相关条目）"))
+        if conv.get("cwd") or self.parts.count():   # 在做文件/datasheet 工作、或库里已有数据时提示
+            parts.append(PARTS_PROMPT)
         start = conv.get("summary_upto", 0) if upto is None else upto
         summ = conv.get("summary") if summary is None else summary
         if summ and start:
@@ -721,15 +722,18 @@ class MainWindow(QMainWindow):
                 elif m.get("content") and not m.get("error"):
                     msgs.append({"role": "assistant", "content": m["content"]})
             elif role == "tool":
+                tcid = m.get("tool_call_id")
+                if not tcid:   # 缺 tool_call_id 的工具消息无法发给接口，跳过（兼容异常/旧数据）
+                    continue
                 content = m.get("content", "")
                 if i in old_tools and len(content) > 1500:
                     content = content[:1500] + "\n…（较早的工具输出已省略以节省上下文，如需请重新读取）"
-                msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": content})
+                msgs.append({"role": "tool", "tool_call_id": tcid, "content": content})
         return msgs
 
     def tools_for(self, conv):
         """记忆和 MCP 工具始终可用；文件、命令和 skill 工具需要关联工作目录。"""
-        tools = MEMORY_TOOLS + self.mcp.tool_specs()
+        tools = MEMORY_TOOLS + PARTS_TOOLS + self.mcp.tool_specs()
         cwd = conv.get("cwd")
         if cwd and os.path.isdir(cwd):
             tools = TOOLS + SHELL_TOOLS + (SKILL_TOOLS if self.skill_on(conv) else []) + tools
@@ -818,6 +822,8 @@ class MainWindow(QMainWindow):
         s.start()
 
     def run_tool(self, s, name, args):
+        if name in PARTS_TOOL_NAMES:
+            return self.parts.run_tool(name, args)
         if name in MEMORY_TOOL_NAMES:
             result = self.memory.run_tool(name, args, source=s.conv["id"])
             self.update_memory_btn()
@@ -1045,6 +1051,7 @@ class MainWindow(QMainWindow):
         if self.distiller:
             self.distiller.wait(3000)
         self.save_convs(force=True)
+        self.parts.close()
         SAVER.flush()
         super().closeEvent(ev)
 

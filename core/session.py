@@ -11,6 +11,7 @@ from PyQt6.QtCore import QObject, QTimer
 from skill_tools import SKILL_TOOL_NAMES, SLOW_TOOLS, ToolError, kill_current, tool_display
 from shell_tools import SHELL_SLOW, SHELL_TOOL_NAMES, kill_shell, shell_display
 from memory_store import MEMORY_TOOL_NAMES
+from mem import PARTS_TOOL_NAMES
 
 from core.worker import ChatWorker, SUMMARY_MARK, ToolThread
 import logging
@@ -252,6 +253,9 @@ class Session(QObject):
         elif name in MEMORY_TOOL_NAMES:
             a = args if isinstance(args, dict) else {}
             disp = str(a.get("query") or a.get("title") or f"#{a.get('id', '')}")
+        elif name in PARTS_TOOL_NAMES:
+            a = args if isinstance(args, dict) else {}
+            disp = str(a.get("model") or a.get("keyword") or a.get("param") or "参数库")
         elif name.startswith("mcp__"):
             disp = self.host.mcp.display(name, args)
         else:

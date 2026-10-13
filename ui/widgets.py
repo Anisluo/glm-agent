@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from skill_tools import SKILL_LABELS
 from shell_tools import SHELL_LABELS
 from memory_store import MEMORY_LABELS, TYPES as MEMORY_TYPES, MemoryStore, parse_json_object
+from mem import PARTS_LABELS
 from infra import (BASE_URLS, DEFAULT_CONFIG, HINT_TEXT, TOOL_LABELS, api_content, diff_stats,
                    lang_of, open_in_explorer, read_text_file, unified_diff)
 from ui.theme import (ACCENT, ACCENT_H, BG, BORDER, CODE_BG, CODE_HEAD, DOC_CSS, HOVER,
@@ -293,7 +294,7 @@ class ToolCard(QWidget):
 
         head = QHBoxLayout()
         name = m.get("name", "")
-        icon, verb = {**TOOL_LABELS, **SKILL_LABELS, **SHELL_LABELS, **MEMORY_LABELS}.get(
+        icon, verb = {**TOOL_LABELS, **SKILL_LABELS, **SHELL_LABELS, **MEMORY_LABELS, **PARTS_LABELS}.get(
             name, ("🔌", "MCP") if name.startswith("mcp__") else ("🔧", name or "工具"))
         if m.get("name") == "write_file" and m.get("new_file"):
             verb = "新建"

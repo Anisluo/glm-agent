@@ -64,8 +64,8 @@ ADAPTER = """## 在本软件中如何执行这个 skill（与上文冲突时以�
 - 第 0 步环境检查 → 程序已自动检查，结果在下方；只有结果显示缺项时才停下来告诉用户按「安装」一节安装（不要自己安装），就绪则直接开始。
 - 第 1 步清点与提取 → pdf_info(path=".") 列出全部 PDF 的页数、字符数、是否扫描件；read_pdf 按页读文本（每次最多约 30000 字符，长文档分段读）；search_pdf 用关键词定位参数所在页（例如 "Absolute Maximum|Electrical Characteristics|Sensitivity"），再只读那几页；同型号多个版本用 diff_pdfs。**多份 datasheet 要在同一次回复里同时调用 read_pdf / search_pdf（连同 get_report_template），程序会并行执行**，不要一份一份地读。
 - 扫描件：本软件不能看图，在样本说明和数据来源中注明“扫描件，未能读取”，对应参数填 \\nd，不要猜。
-- 第 3 步写 .tex → 先 get_report_template 获取模板，再用 write_file 把 `<主题>对比报告.tex` 写到工作目录；局部修改用 edit_file。
-- 第 4 步编译 → build_pdf(path=".tex 文件")，它会跑两遍 xelatex，返回错误与 ≥10pt 的溢出并清理 .aux/.log/.out。有错误或显著溢出就修改 .tex 再编译，直到清零。本软件不能渲染页面预览，以日志为准。
+- 第 3 步生成 .tex → **优先用 render_report**：把整理好的参数、点评、勘误、图表数据组织成 JSON（见工具说明），一次调用即可生成 .tex，程序自动处理转义、表格列宽、TikZ 图表刻度和 best/worst 上色，避免手写出错反复修。只有 render_report 覆盖不了的特殊版式，才 get_report_template + write_file 手写，或用 edit_file 局部微调 render_report 的产物。
+- 第 4 步编译 → build_pdf(path=".tex 文件")，它会跑两遍 xelatex，返回错误与 ≥10pt 的溢出并清理 .aux/.log/.out。用 render_report 生成的 tex 通常一次编译通过；若仍有错误或显著溢出就修改 .tex 再编译，直到清零。本软件不能渲染页面预览，以日志为准。
 - 上下文有限：每读完一份 datasheet，立即在回复里用简短表格记下提取到的参数；较早的 PDF 原文之后会被省略。
 - 全部完成后，用中文简要总结：报告文件名、对比了哪些型号、主要结论、仍存在的问题。"""
 
@@ -100,6 +100,20 @@ SKILL_TOOLS = [
         "name": "get_report_template", "description": "获取对比报告的 LaTeX 模板（样式、宏、表格、TikZ 图）。",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "render_report",
+        "description": ("【推荐】用结构化数据直接生成对比报告 .tex：你只需提供 JSON 数据，程序会自动完成 LaTeX 转义、"
+                        "参数表列宽（≤5 款竖版 / >5 款横版）、TikZ 图表刻度（按数据最大值反算，杜绝溢出）、"
+                        "best/worst 上色。生成后用 build_pdf 编译。优先用它，而不是手写 .tex。"),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "输出的 .tex 文件名，默认 <theme>对比报告.tex"},
+            "data": {"type": "object", "description": (
+                "报告数据。字段：theme(主题)、date、test_condition、source_dir、overview_intro、"
+                "overview_bullets(字符串数组)、conclusion；devices(数组，每项 file/model/vendor/version/note)；"
+                "parameters(数组，每项 name、values(按 devices 顺序的字符串数组，缺项留空)、可选 best/worst 为最优/最差列的下标)；"
+                "charts(数组，每项 title、note、bars[{name,value数值}])；reviews(数组 {model,vendor,text})；errata(字符串数组)。"
+                "数值和单位写普通文本即可（如 ±18.5%、-40--125、°C），不要写 LaTeX 命令。")}},
+            "required": ["data"]}}},
+    {"type": "function", "function": {
         "name": "build_pdf",
         "description": "用 XeLaTeX 编译 .tex 两遍，返回错误和显著溢出，并清理中间文件。",
         "parameters": {"type": "object", "properties": {
@@ -109,7 +123,8 @@ SKILL_TOOL_NAMES = {t["function"]["name"] for t in SKILL_TOOLS}
 SLOW_TOOLS = {"check_env", "pdf_info", "read_pdf", "search_pdf", "diff_pdfs", "build_pdf"}
 SKILL_LABELS = {"check_env": ("🧰", "检查环境"), "pdf_info": ("📑", "PDF 概况"), "read_pdf": ("📖", "读取 PDF"),
                 "search_pdf": ("🔍", "搜索 PDF"), "diff_pdfs": ("🆚", "对比版本"),
-                "get_report_template": ("📐", "读取报告模板"), "build_pdf": ("🛠", "编译 PDF")}
+                "get_report_template": ("📐", "读取报告模板"), "render_report": ("🧩", "生成报告"),
+                "build_pdf": ("🛠", "编译 PDF")}
 
 
 def tool_display(name, args):
@@ -405,6 +420,195 @@ def report_template():
     return _read(os.path.join(d, "templates", "report_template.tex"))
 
 
+# ---------------------------------------------------------------- 结构化报告渲染
+# 让模型只产出结构化数据，.tex 由代码确定性生成：转义、列宽、TikZ 刻度都算好，
+# 从根上避免「手写 tex → Overfull/语法错 → 反复改」的循环。
+_TEX_ESCAPE = [("\\", r"\textbackslash "), ("&", r"\&"), ("%", r"\%"), ("#", r"\#"),
+               ("_", r"\_"), ("{", r"\{"), ("}", r"\}"),
+               ("~", r"\textasciitilde "), ("^", r"\textasciicircum ")]
+_TEX_SYMBOL = [("±", r"$\pm$"), ("×", r"$\times$"), ("≤", r"$\le$"), ("≥", r"$\ge$"),
+               ("≈", r"$\approx$"), ("µ", r"$\mu$"), ("μ", r"$\mu$"), ("Ω", r"$\Omega$"),
+               ("°", r"$^\circ$"), ("−", "-"), ("∞", r"$\infty$")]
+
+
+def _tex(s):
+    """把用户文本转义成安全的 LaTeX；常见单位/符号转成数学写法。"""
+    s = str(s if s is not None else "")
+    for a, b in _TEX_ESCAPE:
+        s = s.replace(a, b)
+    for a, b in _TEX_SYMBOL:
+        s = s.replace(a, b)
+    return s or r"\nd"
+
+
+def _num(v):
+    f = float(v)
+    return f"{f:.4g}"
+
+
+def _param_table(devices, params):
+    """参数总表：≤5 款竖版、>5 款横版（landscape）；列宽按版心自动算，杜绝列宽溢出。"""
+    n = len(devices)
+    land = n > 5
+    # 扣掉每列两侧的 \tabcolsep(4pt≈0.141cm）和一点安全余量，避免表格宽于版心
+    sep = 0.141
+    usable = (25.4 if land else 16.6) - 2 * (n + 1) * sep - 0.3
+    first = 2.9 if land else 3.4
+    w = max(1.6, round((usable - first) / max(n, 1), 2))
+    cols = f">{{\\raggedright\\arraybackslash}}p{{{first}cm}}" + f"*{{{n}}}{{>{{\\centering\\arraybackslash}}p{{{w}cm}}}}"
+    head = r"\rowcolor{hdr}\hd{参数}" + "".join(f" & \\hd{{{_tex(d.get('model', ''))}}}" for d in devices) + r"\\"
+    rows = []
+    for k, p in enumerate(params):
+        vals = list(p.get("values", []))
+        vals += [""] * (n - len(vals))
+        cells = []
+        for j in range(n):
+            cell = _tex(vals[j]) if str(vals[j]).strip() else r"\nd"
+            if p.get("best") == j:
+                cell = f"\\best{{{cell}}}"
+            elif p.get("worst") == j:
+                cell = f"\\worst{{{cell}}}"
+            cells.append(cell)
+        rc = r"\rowcolor{rowa}" if k % 2 else ""
+        rows.append(rc + _tex(p.get("name", "")) + " & " + " & ".join(cells) + r"\\")
+    body = ("\\begin{landscape}\n\\small\n" if land else "")
+    body += "\\setlength{\\tabcolsep}{4pt}\n"
+    body += (f"\\begin{{longtable}}{{{cols}}}\n\\toprule\n{head}\n\\midrule\n\\endhead\n"
+             + "\n".join(rows) + "\n\\bottomrule\n\\end{longtable}\n")
+    body += "绿色为该行最优，红色为需留意的短板，“--”表示规格书未给出。\n"
+    body += ("\\normalsize\n\\end{landscape}\n" if land else "")
+    return body
+
+
+def _chart(ch, idx):
+    """单向条形图：x 刻度由数据最大值反算，使最长条 ≈ 6cm，从根本上避免水平溢出。"""
+    bars = [b for b in ch.get("bars", []) if isinstance(b.get("value", None), (int, float))]
+    if not bars:
+        return ""
+    maxv = max(b["value"] for b in bars) or 1.0
+    xu = round(6.0 / maxv, 5)          # 最长条固定 6cm
+    pad = maxv * 0.02
+    lines = [f"\\begin{{tikzpicture}}[x={xu}cm,y=1cm]  % 自动刻度：满刻度 {_num(maxv)} × x ≈ 6cm"]
+    for i, b in enumerate(bars, 1):
+        y = -0.5 * i
+        name, v = _tex(b.get("name", "")), float(b["value"])
+        lines.append(f"\\node[anchor=east,font=\\small] at (-{pad:.4g},{y}) {{{name}}};")
+        lines.append(f"\\fill[trk]  (0,{y}-0.14) rectangle ({_num(maxv)},{y}+0.14);")
+        lines.append(f"\\fill[barb] (0,{y}-0.14) rectangle ({_num(v)},{y}+0.14);")
+        lines.append(f"\\node[anchor=west,font=\\scriptsize] at ({_num(v)}+{pad:.4g},{y}) {{{_num(v)}}};")
+    lines.append("\\end{tikzpicture}")
+    title = _tex(ch.get("title", f"图 {idx}"))
+    note = _tex(ch.get("note", ""))
+    cap = f"\n\n\\small 图 {idx}：{note}。" if note else ""
+    return (f"\\begin{{center}}\n\\textbf{{\\small {title}}}\\par\\vspace{{2pt}}\n"
+            + "\n".join(lines) + cap + "\n\\end{center}\n")
+
+
+def render_report(data, cwd, path):
+    """用结构化数据（data）确定性生成对比报告 .tex，返回 (结果文本, 是否成功, 文件绝对路径)。"""
+    if not isinstance(data, dict):
+        raise ToolError("data 必须是对象（JSON）")
+    devices = data.get("devices") or []
+    params = data.get("parameters") or []
+    if not devices:
+        raise ToolError("devices 不能为空（至少一款器件）")
+    rel = path or (str(data.get("theme", "对比")) + "对比报告.tex")
+    if not rel.lower().endswith(".tex"):
+        rel += ".tex"
+    out = safe_path(cwd, rel)
+
+    models = " / ".join(_tex(d.get("model", "")) for d in devices)
+    n = len(devices)
+    P = [r"\documentclass[11pt,a4paper]{ctexart}",
+         r"\usepackage[margin=2.0cm]{geometry}",
+         r"\usepackage{booktabs,longtable,array,multirow}",
+         r"\usepackage[table]{xcolor}", r"\usepackage{pdflscape}", r"\usepackage{tikz}",
+         r"\usepackage{hyperref}",
+         r"\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black}",
+         r"\definecolor{hdr}{RGB}{31,78,121}", r"\definecolor{rowa}{RGB}{240,245,250}",
+         r"\definecolor{barb}{RGB}{47,111,179}", r"\definecolor{barr}{RGB}{184,58,58}",
+         r"\definecolor{trk}{RGB}{236,239,243}",
+         r"\newcommand{\best}[1]{\textcolor{green!45!black}{\textbf{#1}}}",
+         r"\newcommand{\worst}[1]{\textcolor{red!70!black}{\textbf{#1}}}",
+         r"\newcommand{\nd}{--}", r"\newcommand{\hd}[1]{\textcolor{white}{\textbf{#1}}}",
+         r"\renewcommand{\arraystretch}{1.3}",
+         f"\\title{{\\textbf{{{_tex(data.get('theme', ''))} {n} 款竞品对比报告}}\\\\[4pt]\\large {models}}}",
+         f"\\author{{基于目录内 {n} 份原厂规格书整理}}",
+         f"\\date{{{_tex(data.get('date', ''))}}}",
+         r"\begin{document}", r"\maketitle", ""]
+
+    P.append(r"\section{概述与结论}")
+    if data.get("overview_intro"):
+        P.append(_tex(data["overview_intro"]))
+    bullets = data.get("overview_bullets") or []
+    if bullets:
+        P.append(r"\begin{itemize}")
+        P += [f"  \\item {_tex(b)}" for b in bullets]
+        P.append(r"\end{itemize}")
+    if data.get("conclusion"):
+        P.append(f"\\textbf{{{_tex(data['conclusion'])}}}")
+    P.append("")
+
+    # 样本说明
+    P.append(r"\section{样本说明}")
+    P.append(r"\setlength{\tabcolsep}{4pt}")
+    P.append(r"\begin{longtable}{>{\raggedright\arraybackslash}p{3.6cm}>{\raggedright\arraybackslash}p{2.8cm}"
+             r">{\raggedright\arraybackslash}p{2.2cm}>{\raggedright\arraybackslash}p{2.6cm}"
+             r">{\raggedright\arraybackslash}p{3.2cm}}")
+    P.append(r"\toprule")
+    P.append(r"\rowcolor{hdr}\hd{文件} & \hd{型号} & \hd{厂商} & \hd{版本 / 日期} & \hd{备注}\\")
+    P.append(r"\midrule" + "\n\\endhead")
+    for k, d in enumerate(devices):
+        rc = r"\rowcolor{rowa}" if k % 2 else ""
+        P.append(rc + " & ".join(_tex(d.get(x, "")) for x in ("file", "model", "vendor", "version", "note")) + r"\\")
+    P.append(r"\bottomrule" + "\n\\end{longtable}\n")
+
+    # 参数总表
+    if params:
+        P.append(f"\\section{{参数总表（{_tex(data.get('test_condition', '典型值'))}）}}")
+        P.append(_param_table(devices, params))
+
+    # 关键参数图
+    charts = data.get("charts") or []
+    if charts:
+        P.append(r"\section{关键参数图}")
+        for i, ch in enumerate(charts, 1):
+            P.append(_chart(ch, i))
+
+    # 逐款点评
+    reviews = data.get("reviews") or []
+    if reviews:
+        P.append(r"\section{逐款点评}")
+        P.append(r"\begin{description}")
+        for r in reviews:
+            head = _tex(r.get("model", ""))
+            if r.get("vendor"):
+                head += f"（{_tex(r['vendor'])}）"
+            P.append(f"  \\item[{head}] {_tex(r.get('text', ''))}")
+        P.append(r"\end{description}")
+
+    # 勘误
+    errata = data.get("errata") or []
+    if errata:
+        P.append(r"\section{规格书疑点与勘误}")
+        P.append(r"\begin{enumerate}")
+        P += [f"  \\item {_tex(e)}" for e in errata]
+        P.append(r"\end{enumerate}")
+
+    if data.get("source_dir"):
+        P.append(f"\n\\vspace{{1em}}\n\\noindent\\small 数据来源：目录 \\texttt{{{_tex(data['source_dir'])}}}"
+                 f" 内 {n} 份 PDF。")
+    P.append(r"\end{document}")
+
+    tex = "\n".join(P) + "\n"
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(tex)
+    msg = (f"已生成 {os.path.basename(out)}（{n} 款器件、{len(params)} 个参数、{len(charts)} 张图）。"
+           f"图表刻度与表格列宽已自动算好，接下来直接用 build_pdf 编译即可。")
+    return msg, True, out
+
+
 # ---------------------------------------------------------------- 分发
 def run_skill_tool(name, args, cwd):
     """返回 (给模型的结果文本, 卡片信息)。"""
@@ -416,6 +620,9 @@ def run_skill_tool(name, args, cwd):
     if name == "get_report_template":
         r = report_template()
         return r, {"status": "ok", "preview": r}
+    if name == "render_report":
+        r, ok, out = render_report(args.get("data"), cwd, args.get("path"))
+        return r, {"status": "ok" if ok else "error", "preview": r}
     if name == "pdf_info":
         r = pdf_info(safe_path(cwd, args.get("path")))
     elif name == "read_pdf":
