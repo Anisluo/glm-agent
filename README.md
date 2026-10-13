@@ -43,14 +43,15 @@ winget install --id MiKTeX.MiKTeX -e
 
 ## 数据文件
 
-以下文件都在程序（exe）所在目录，包含个人数据，已在 `.gitignore` 中排除：
+以下数据都在程序（exe）所在目录，包含个人数据，已在 `.gitignore` 中排除。
+所有 `*.json` 统一放在 `config/` 子目录下，保持根目录整洁：
 
 | 文件 | 内容 |
 |---|---|
-| `config.json` | API Key、接口地址、模型等设置 |
-| `conversations.json` | 对话记录（及 `.bak` 备份） |
-| `memory.json` | 长期记忆库 |
-| `mcp_servers.json` | MCP 服务器配置（可能含令牌） |
+| `config/config.json` | API Key、接口地址、模型等设置 |
+| `config/conversations.json` | 对话记录（及 `.bak` 备份） |
+| `config/memory.json` | 长期记忆库 |
+| `config/mcp_servers.json` | MCP 服务器配置（可能含令牌） |
 | `logs/`、`cache/` | 日志、PDF 解析缓存 |
 
 ## MCP 配置示例

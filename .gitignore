@@ -1,8 +1,5 @@
-# 本地配置与个人数据（含 API Key、对话、记忆、MCP 令牌），不要提交
-config.json
-conversations.json
-memory.json
-mcp_servers.json
+# 本地配置与个人数据（含 API Key、对话、记忆、MCP 令牌），统一放在 config/ 下，不要提交
+config/
 *.json.bak
 *.json.tmp
 *.broken-*.json
